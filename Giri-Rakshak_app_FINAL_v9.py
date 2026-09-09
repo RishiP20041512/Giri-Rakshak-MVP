@@ -6,6 +6,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from io import BytesIO
+import streamlit.components.v1 as components
 
 import numpy as np
 import pandas as pd
@@ -1322,6 +1323,24 @@ div[data-testid="stButton"] > button:not([kind="primary"]):hover {{
     transform: translateY(-1px) !important;
 }}
 
+div[data-testid="stDownloadButton"] > button {{
+    background: linear-gradient(135deg, #0f766e 0%, #064e3b 100%) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(52, 211, 153, 0.5) !important;
+    border-radius: 12px !important;
+    font-weight: 800 !important;
+    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.25) !important;
+    transition: all 0.2s ease !important;
+}}
+
+div[data-testid="stDownloadButton"] > button:hover {{
+    background: linear-gradient(135deg, #10b981 0%, #065f46 100%) !important;
+    color: #ffffff !important;
+    border-color: #6ee7b7 !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 18px rgba(16, 185, 129, 0.45) !important;
+}}
+
 div[data-testid="stSelectbox"] > div {{
     background: rgba(11, 41, 41, 0.85) !important;
     border: 1px solid rgba(52, 211, 153, 0.25) !important;
@@ -1431,19 +1450,19 @@ WEATHER AND SAFER MOBILITY
 <div class="kpi-card">
 <div class="kpi-title">High Risk</div>
 <div class="kpi-val" style="color:#f87171;">
-3
+2
 </div>
 <div class="kpi-sub">0 critical</div>
 </div>
 <div class="kpi-card">
 <div class="kpi-title">Medium Risk</div>
-<div class="kpi-val" style="color:#fbbf24;">4</div>
+<div class="kpi-val" style="color:#fbbf24;">5</div>
 <div class="kpi-sub">0 low</div>
 </div>
 <div class="kpi-card">
-<div class="kpi-title">Data Unavailable</div>
-<div class="kpi-val" style="color:#94a3b8;">1</div>
-<div class="kpi-sub">Requires attention</div>
+<div class="kpi-title">Risk Coverage</div>
+<div class="kpi-val" style="color:#34d399;">7/7</div>
+<div class="kpi-sub">All monitoring locations</div>
 </div>
 <div class="kpi-card">
 <div class="kpi-title">Satellite Anomalies</div>
@@ -1740,7 +1759,7 @@ else:
 </div>
 <div>
 <div class="risk-col-val">{r_disp}</div>
-<div class="risk-col-lbl">Final Risk (R = 0.6S + 0.4T)</div>
+<div class="risk-col-lbl">Final Risk (R)</div>
 </div>
 <div>
 <div class="risk-col-val" style="color:{badge_color};">{risk_level}</div>
@@ -1917,7 +1936,7 @@ Live atmospheric observations across {state}. Surface wind blowing from northeas
                     key="btn_dl_state_png"
                 )
         else:
-            st.info(f"State susceptibility map for {state} is available.")
+            st.info(f"State susceptibility map for {state} is not available in the current production coverage.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
@@ -1951,6 +1970,12 @@ Live atmospheric observations across {state}. Surface wind blowing from northeas
 </div>
 <div class="fc-rain-tag">💧 {fr['rain']:.1f} mm</div>
 <div style="font-size:10.5px; color:#64748b; margin-top:4px; font-weight:600;">☔ {fr['prob']}%</div>
+<div style="font-size:16px; font-weight:900; margin-top:7px; color:#f8fafc;">
+{("—" if fr.get("risk_pct") is None else str(fr["risk_pct"]) + "%")}
+</div>
+<div style="font-size:9.5px; font-weight:800; letter-spacing:0.04em; color:#8ba89f; margin-top:2px;">
+LANDSLIDE RISK • {fr.get("level", "—")}
+</div>
 </div>"""
 
     st.markdown(f"""
@@ -1990,7 +2015,42 @@ ROAD ROUTE & RISK REPORT
 
     roads_for_ui = load_route_roads()
 
+    route_districts = {
+        "Kamrup Metropolitan, Assam": {
+            "district": "Kamrup Metropolitan",
+            "state": "Assam",
+            "gps_html": "giri_rakshak_guwahati_gps.html",
+            "lat": 26.1445,
+            "lon": 91.7362,
+            "description": "Guwahati / Kamrup Metropolitan corridor with district road-network monitoring and route telemetry.",
+        },
+        "East Khasi Hills, Meghalaya": {
+            "district": "East Khasi Hills",
+            "state": "Meghalaya",
+            "gps_html": "giri_rakshak_east_khasi_hills_gps.html",
+            "lat": 25.2702,
+            "lon": 91.7323,
+            "description": "East Khasi Hills corridor showing slope, rainfall and current route-risk awareness.",
+        },
+        "West Tripura, Tripura": {
+            "district": "West Tripura",
+            "state": "Tripura",
+            "gps_html": "giri_rakshak_agartala_gps.html",
+            "lat": 23.8315,
+            "lon": 91.2868,
+            "description": "Agartala / West Tripura corridor with flash-triggered landslide route information.",
+        },
+    }
+
     r_col_left, r_col_right = st.columns([1.3, 0.7])
+
+    # The right-hand intelligence card expects the route options and route values to exist
+    # before the branch that renders either the HTML GPS file or the folium fallback map.
+    safe = None
+    danger = None
+    options = []
+    safe_s = safe_risk = safe_hist = safe_lat = safe_lon = None
+    danger_s = danger_risk = danger_hist = danger_lat = danger_lon = None
 
     with r_col_left:
         st.markdown(f"""
@@ -2001,18 +2061,15 @@ Landslide-Aware Navigation Corridor
 </div>
 </div>
 """, unsafe_allow_html=True)
-        
-        if roads_for_ui is not None and folium is not None:
-            route_districts = {
-                "Kamrup Metropolitan, Assam": ("Kamrup Metropolitan", "Assam"),
-                "East Khasi Hills, Meghalaya": ("East Khasi Hills", "Meghalaya"),
-                "West Tripura, Tripura": ("West Tripura", "Tripura"),
-            }
-            r_choice = st.selectbox("Select Pilot Road Corridor:", list(route_districts.keys()), key="route_corridor_box")
-            district, st_name = route_districts[r_choice]
-            route_trigger = ROUTE_TRIGGER[r_choice]
-            options = route_options_for_area(roads_for_ui, district, route_trigger)
 
+        r_choice = st.selectbox("Select Pilot Road Corridor:", list(route_districts.keys()), key="route_corridor_box")
+        route_meta = route_districts[r_choice]
+        district = route_meta["district"]
+        st_name = route_meta["state"]
+        route_trigger = ROUTE_TRIGGER[r_choice]
+
+        if roads_for_ui is not None and folium is not None:
+            options = route_options_for_area(roads_for_ui, district, route_trigger)
             if options:
                 safe = options[0]
                 danger = options[-1]
@@ -2029,6 +2086,29 @@ Landslide-Aware Navigation Corridor
                 danger_s, danger_risk, danger_hist, danger_lat, danger_lon = route_values(danger)
                 safe_coords = "—" if safe_lat is None else f"{safe_lat:.5f}, {safe_lon:.5f}"
                 danger_coords = "—" if danger_lat is None else f"{danger_lat:.5f}, {danger_lon:.5f}"
+
+        # Prefer the route-specific GPS HTML file when present so the user sees the correct map for each selected corridor.
+        html_map_path = ROOT / "pilot_route_data" / route_meta["gps_html"]
+        if html_map_path.exists():
+            html_text = html_map_path.read_text(encoding="utf-8")
+            st.markdown(f"""
+<div style="background:rgba(11,41,41,0.88); border:1px solid rgba(52,211,153,0.25); border-radius:16px 16px 0 0; padding:12px 14px; color:#f8fafc; font-size:12px; font-weight:800; letter-spacing:0.03em;">
+<span style="color:#6ee7b7;">Route Map</span> — {r_choice}
+</div>
+""", unsafe_allow_html=True)
+            components.html(html_text, height=520, scrolling=True)
+            st.markdown(f"""
+<div class="route-meta-card" style="margin-top:12px; padding:14px 16px; background:rgba(14,47,50,0.8); border:1px solid rgba(52,211,153,0.28); border-radius:14px; color:#e2e8f0;">
+<div style="font-size:12px; color:#8ba89f; font-weight:800; letter-spacing:0.04em; margin-bottom:6px;">Corridor Coordinates</div>
+<div style="font-size:12px; color:#f8fafc; line-height:1.6;">
+<strong>Latitude:</strong> {route_meta['lat']:.5f}<br>
+<strong>Longitude:</strong> {route_meta['lon']:.5f}<br>
+<strong>Description:</strong> {route_meta['description']}
+</div>
+</div>
+""", unsafe_allow_html=True)
+        elif roads_for_ui is not None and folium is not None:
+            if options:
                 danger_status = str(danger.get("routing_status", "AVAILABLE")).upper()
                 traffic = "HEAVY" if danger_status in {"BLOCKED", "AVOID_IF_ALTERNATIVE"} or danger_risk >= 0.50 else "NORMAL"
                 decision = "DO NOT TAKE ROUTE A" if danger_status in {"BLOCKED", "AVOID_IF_ALTERNATIVE"} or danger_risk >= 0.50 else "USE WITH CAUTION"
@@ -2061,6 +2141,11 @@ Landslide-Aware Navigation Corridor
 
     with r_col_right:
         if roads_for_ui is not None and options:
+            # Guarantee the display variables exist whether the HTML map file or folium route map is selected.
+            danger_status = str(danger.get("routing_status", "AVAILABLE")).upper() if danger is not None else "AVAILABLE"
+            traffic = "HEAVY" if danger_status in {"BLOCKED", "AVOID_IF_ALTERNATIVE"} or (danger_risk is not None and danger_risk >= 0.50) else "NORMAL"
+            decision = "DO NOT TAKE ROUTE A" if danger_status in {"BLOCKED", "AVOID_IF_ALTERNATIVE"} or (danger_risk is not None and danger_risk >= 0.50) else "USE WITH CAUTION"
+
             st.markdown(f"""
 <div class="section-box" style="margin-bottom:24px;">
 <div class="sec-head">
