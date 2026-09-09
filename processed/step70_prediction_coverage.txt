@@ -1,0 +1,8 @@
+STEP 70 — 8-FACTOR SUSCEPTIBILITY PREDICTION COVERAGE
+============================================================
+Total NER cells: 4168019
+Valid prediction cells: 3544154
+Prediction coverage (%): 85.0321
+Minimum susceptibility: 0.039076
+Maximum susceptibility: 0.908244
+Mean susceptibility: 0.280438

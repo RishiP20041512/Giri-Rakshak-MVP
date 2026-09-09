@@ -1,0 +1,89 @@
+@"
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# =========================
+# RAW / LARGE DATA
+# =========================
+raw_data/
+pilot_route_data/
+
+*.hdf
+*.h5
+*.nc
+*.vrt
+*.aux.xml
+*.ovr
+
+# =========================
+# CSV - ignore by default
+# =========================
+*.csv
+
+# =========================
+# TIFF - ignore by default
+# =========================
+*.tif
+*.tiff
+
+# =========================
+# KEEP files required by app.py
+# =========================
+
+!processed/
+!processed/predictors/
+
+!processed/step72_statewise_susceptibility.csv
+
+!processed/step70_8factor_susceptibility_probability.tif
+
+!processed/predictors/ndvi_250m.tif
+!processed/predictors/elevation_250m.tif
+!processed/predictors/slope_250m.tif
+
+# Production Random Forest model
+!processed/step69_production_8factor_rf.joblib
+
+# =========================
+# State susceptibility maps
+# =========================
+!processed/state_maps/
+!processed/state_maps/*.png
+!processed/state_maps/*.pdf
+
+# =========================
+# Exclude analysis outputs
+# =========================
+processed/categorical_color_validation/
+processed/unseen_meghalaya/
+processed/step71_final_8factor_susceptibility_map.png
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDE / secrets
+# =========================
+.vscode/
+.idea/
+.env
+.env.*
+
+# =========================
+# Temporary files
+# =========================
+*.log
+*.tmp
+"@ | Set-Content .gitignore

@@ -1,0 +1,22 @@
+STEP 72 — FINAL SUSCEPTIBILITY MAP VALIDATION
+============================================================
+
+Total inventory points: 991
+Map-covered points: 891
+Missing points: 100
+Point coverage (%): 89.9092
+
+ROC-AUC: 0.720274
+PR-AUC: 0.653882
+
+Background mean score: 0.277189
+Background median score: 0.242526
+Landslide mean score: 0.407352
+Landslide median score: 0.365873
+
+Inventory point class distribution:
+1 - Very Low: total=217, landslide=49, background=168
+2 - Low: total=432, landslide=163, background=269
+3 - Moderate: total=161, landslide=103, background=58
+4 - High: total=67, landslide=47, background=20
+5 - Very High: total=14, landslide=13, background=1

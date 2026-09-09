@@ -1,0 +1,47 @@
+FINAL NORTHEAST INDIA LANDSLIDE SUSCEPTIBILITY MAP
+======================================================================
+
+MODEL: 8-FACTOR RANDOM FOREST
+
+Conditioning factors:
+1. Elevation
+2. Slope
+3. Rainfall
+4. Soil moisture
+5. NDVI
+6. Distance to road
+7. Lineament density
+8. Geomorphological origin
+
+Excluded/unavailable factors:
+Level-I LUCC: excluded from final model
+Lithology: unavailable during final modelling
+
+Raster specification:
+CRS: EPSG:6933
+Pixel size: 250 m x 250 m
+Pixel area: 0.0625 km²
+
+Total raster cells: 12571020
+Valid susceptibility cells: 3544154
+NoData cells: 9026866
+Mapped area: 221509.62 km²
+
+Susceptibility class statistics:
+1 - Very Low: 1045619 cells, 65351.19 km², 29.50%
+2 - Low: 1998041 cells, 124877.56 km², 56.38%
+3 - Moderate: 360224 cells, 22514.00 km², 10.16%
+4 - High: 122612 cells, 7663.25 km², 3.46%
+5 - Very High: 17658 cells, 1103.62 km², 0.50%
+
+Classification thresholds:
+Very Low: RF score < 0.20
+Low: 0.20 <= RF score < 0.40
+Moderate: 0.40 <= RF score < 0.60
+High: 0.60 <= RF score < 0.80
+Very High: RF score >= 0.80
+
+Important interpretation note:
+The five classes represent relative Random Forest susceptibility scores. They should not be interpreted as calibrated probabilities of landslide occurrence.
+
+The map contains NoData where one or more required conditioning factors were unavailable. No predictor values were artificially imputed for mapping.

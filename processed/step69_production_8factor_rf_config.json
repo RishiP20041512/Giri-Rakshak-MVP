@@ -1,0 +1,37 @@
+{
+  "model": "RandomForestClassifier",
+  "purpose": "production susceptibility mapping",
+  "n_estimators": 700,
+  "max_features": "sqrt",
+  "min_samples_leaf": 5,
+  "max_depth": null,
+  "random_state": 42,
+  "n_jobs": -1,
+  "class_weight": null,
+  "training_samples": 991,
+  "features": [
+    "elevation_m",
+    "slope_deg",
+    "rainfall_3day",
+    "soil_moisture",
+    "ndvi",
+    "distance_to_road_m",
+    "lineament_density",
+    "geomorph_origin"
+  ],
+  "numeric_features": [
+    "elevation_m",
+    "slope_deg",
+    "rainfall_3day",
+    "soil_moisture",
+    "ndvi",
+    "distance_to_road_m",
+    "lineament_density"
+  ],
+  "categorical_features": [
+    "geomorph_origin"
+  ],
+  "removed_factor": "Level_I LUCC",
+  "unavailable_factor": "Lithology",
+  "evaluation_reference": "Step 65 untouched spatial test results"
+}

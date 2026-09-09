@@ -1,0 +1,28 @@
+STEP 71 — 8-FACTOR SUSCEPTIBILITY CLASSIFICATION
+============================================================
+
+Input raster:
+C:\Users\Adrija\OneDrive\Desktop\landslide prj\Giri-rakshak-main\processed\step70_8factor_susceptibility_probability.tif
+
+Classification thresholds:
+1 Very Low    : RF score < 0.20
+2 Low         : 0.20 <= RF score < 0.40
+3 Moderate    : 0.40 <= RF score < 0.60
+4 High        : 0.60 <= RF score < 0.80
+5 Very High   : RF score >= 0.80
+
+Important: classes represent relative RF susceptibility scores and are not calibrated probabilities of landslide occurrence.
+
+Total cells: 12571020
+Valid cells: 3544154
+NoData cells: 9026866
+Coverage (%): 28.1931
+Minimum score: 0.039076
+Maximum score: 0.908244
+
+Class distribution:
+1 - Very Low: 1045619 cells (29.50%)
+2 - Low: 1998041 cells (56.38%)
+3 - Moderate: 360224 cells (10.16%)
+4 - High: 122612 cells (3.46%)
+5 - Very High: 17658 cells (0.50%)
