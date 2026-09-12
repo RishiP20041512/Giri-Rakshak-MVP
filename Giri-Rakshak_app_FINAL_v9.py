@@ -42,6 +42,7 @@ except Exception:
 
 from risk_fusion import fuse_risk
 from dynamic.config import EAST_KHASI_HILLS, GENERIC_NER_DISTRICT
+from dynamic.pipeline import apply_satellite_escalation
 
 
 # ============================================================
@@ -79,6 +80,66 @@ def initialize_gee():
 
 SAT_HALF_SIZE_DEG = 0.01  # ~1.1km half-width query box; shared by make_satellite_region() and the centroid->lat/lon math below
 
+# --- Confidence-tier thresholds for satellite disturbance flags ---
+# These do NOT replace the "needs ground verification" requirement — they
+# tell a reader HOW urgently to verify, using signals already computed
+# elsewhere in this pipeline (RF susceptibility, live rainfall vs trigger
+# thresholds, dual-source satellite agreement). Starting points only —
+# recalibrate against real confirmed/false-positive cases, same philosophy
+# as DistrictConfig's calibration_note in dynamic/config.py.
+SAT_CONF_SUS_THRESHOLD = 0.5     # RF susceptibility considered "elevated" above this
+SAT_CONF_MIN_AREA_HA = 2.0       # flagged area below this is more likely sensor speckle than real disturbance
+
+
+def satellite_confidence_tier(satellite_result, sus, r24, r72, th24, th72):
+    """
+    Combine the satellite disturbance flag with independent corroborating
+    signals into a LOW/MEDIUM/HIGH confidence tier + human-readable
+    reasoning. Returns (None, []) if there's nothing to score (no run yet,
+    no usable scene, or no disturbance detected).
+    """
+    if not satellite_result or satellite_result.get("status") != "ok" or not satellite_result.get("disturbance_detected"):
+        return None, []
+
+    reasons = []
+    score = 0
+
+    sources = satellite_result.get("sources_used", [])
+    if len(sources) >= 2:
+        score += 1
+        reasons.append("✅ Both NDVI (Sentinel-2) and SAR (Sentinel-1) independently agree — stronger than a single source.")
+    else:
+        reasons.append(f"⚪ Only one source available this run ({sources[0] if sources else 'none'}) — no independent cross-check.")
+
+    area_ha = satellite_result.get("estimated_area_ha", 0.0) or 0.0
+    if area_ha >= SAT_CONF_MIN_AREA_HA:
+        score += 1
+        reasons.append(f"✅ Flagged area ({area_ha:.1f} ha) is above the {SAT_CONF_MIN_AREA_HA:.0f} ha noise-floor — unlikely to be scattered sensor speckle alone.")
+    else:
+        reasons.append(f"⚪ Flagged area ({area_ha:.1f} ha) is small — could be isolated sensor noise rather than a real disturbance.")
+
+    if sus is not None and sus >= SAT_CONF_SUS_THRESHOLD:
+        score += 1
+        reasons.append(f"✅ Location's static RF susceptibility ({sus:.2f}) is already elevated — satellite signal aligns with known terrain risk.")
+    elif sus is not None:
+        reasons.append(f"⚪ Location's static RF susceptibility ({sus:.2f}) is low — satellite signal isn't corroborated by terrain history.")
+
+    rain_active = (r24 is not None and th24 and r24 >= 0.5 * th24) or (r72 is not None and th72 and r72 >= 0.5 * th72)
+    if rain_active:
+        score += 1
+        reasons.append("✅ Recent rainfall is already elevated relative to this district's trigger thresholds — consistent with active slope destabilization.")
+    else:
+        reasons.append("⚪ Recent rainfall is not currently elevated — satellite signal alone, without a rainfall driver, is less conclusive.")
+
+    if score >= 3:
+        tier = "HIGH"
+    elif score == 2:
+        tier = "MEDIUM"
+    else:
+        tier = "LOW"
+
+    return tier, reasons
+
 
 def make_satellite_region(lat, lon, half_size_deg=SAT_HALF_SIZE_DEG):
     import ee
@@ -88,19 +149,13 @@ def make_satellite_region(lat, lon, half_size_deg=SAT_HALF_SIZE_DEG):
     ])
 
 
-# --- Satellite -> risk-level escalation (mirrors the normal->watch->warning
-# override rule in dynamic/pipeline.py, applied to the 4-tier LOW/MEDIUM/
-# HIGH/CRITICAL scale used in this app's risk badge). Kept as an explicit
-# override on the categorical level, NOT folded into the numeric RiskScore,
-# same design rationale as pipeline.py's satellite override. ---
+# --- Satellite -> risk-level escalation: uses the SAME shared rule as
+# dynamic/pipeline.py's normal->watch->warning override (Section 8), via
+# apply_satellite_escalation(), applied here to this app's 4-tier
+# LOW/MEDIUM/HIGH/CRITICAL scale. One authoritative implementation,
+# imported below, instead of a second copy of the same policy living
+# only in the app. ---
 RISK_LEVELS_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-
-
-def escalate_risk_level(level: str) -> str:
-    if level not in RISK_LEVELS_ORDER:
-        return level
-    idx = RISK_LEVELS_ORDER.index(level)
-    return RISK_LEVELS_ORDER[min(idx + 1, len(RISK_LEVELS_ORDER) - 1)]
 
 
 def sat_loc_key(loc):
@@ -1812,16 +1867,10 @@ else:
     # numerically into risk_score itself.
     # --------------------------------------------------------
     sat_stored = st.session_state["sat_checks"].get(sat_loc_key(loc))
-    sat_escalated = False
-    if (
-        sat_stored
-        and sat_stored["result"].get("status") == "ok"
-        and sat_stored["result"].get("disturbance_detected")
-        and risk_level != "UNAVAILABLE"
-    ):
-        escalated_level = escalate_risk_level(risk_level)
-        sat_escalated = escalated_level != risk_level
-        risk_level = escalated_level
+    risk_level, sat_escalation_reason = apply_satellite_escalation(
+        risk_level, RISK_LEVELS_ORDER, sat_stored["result"] if sat_stored else None
+    )
+    sat_escalated = sat_escalation_reason is not None
 
     temp_val = round(cur.get("temperature_2m", 22)) if cur else 22
     humidity_val = round(cur.get("relative_humidity_2m", 92)) if cur else 92
@@ -2180,6 +2229,36 @@ Live atmospheric observations across {state}. Surface wind blowing from northeas
                         "above by one tier as corroborating evidence — not proof of "
                         "an active landslide."
                     )
+
+                    # --------------------------------------------------------
+                    # CONFIDENCE TIER — combines the satellite flag with
+                    # independent corroborating signals already computed
+                    # elsewhere (RF susceptibility, live rainfall vs trigger
+                    # thresholds, dual-source agreement). Tells the reader
+                    # HOW urgently to verify, not whether to — ground
+                    # verification is still required at every tier.
+                    # --------------------------------------------------------
+                    conf_tier, conf_reasons = satellite_confidence_tier(satellite_result, sus, r24, r72, th24, th72)
+                    if conf_tier:
+                        tier_style = {
+                            "HIGH": ("#ef4444", "🔺", "Urgent — recommend prioritizing this location for field verification as soon as possible."),
+                            "MEDIUM": ("#f59e0b", "🔸", "Elevated — recommend scheduling a field check in the near term."),
+                            "LOW": ("#84cc16", "🔹", "Routine — worth a follow-up check, but corroborating signals are weak so far."),
+                        }[conf_tier]
+                        tier_color, tier_icon, tier_advice = tier_style
+
+                        st.markdown(f"""
+<div style="background: rgba(255,255,255,0.06); border: 1.5px solid {tier_color}; border-radius: 14px; padding: 14px 18px; margin: 10px 0;">
+<div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+<span style="font-size:20px;">{tier_icon}</span>
+<span style="font-size:16px; font-weight:900; color:{tier_color};">{conf_tier} CONFIDENCE</span>
+</div>
+<div style="font-size:13px; color:#f8fafc; margin-bottom:8px;">{tier_advice}</div>
+<div style="font-size:12.5px; color:#cbd5e1; line-height:1.7;">
+{"<br>".join(conf_reasons)}
+</div>
+</div>
+""", unsafe_allow_html=True)
 
                     # --------------------------------------------------------
                     # WHERE exactly, within the query box, is it concentrated?

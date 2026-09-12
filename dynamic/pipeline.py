@@ -52,6 +52,35 @@ class DynamicLayerResult:
         return "\n".join(lines)
 
 
+def apply_satellite_escalation(current_level: str, tier_order: list, satellite_result: Optional[dict]):
+    """
+    Shared satellite-escalation rule (architecture doc Section 8): a
+    confirmed satellite disturbance bumps the current alert tier UP BY
+    ONE STEP along `tier_order`, capped at the top tier — never folded
+    numerically into any underlying score (Section 6.4).
+
+    Generalized over `tier_order` so the SAME rule serves both this
+    module's 3-tier normal/watch/warning state machine and a caller's
+    own tier scale (e.g. the app's 4-tier LOW/MEDIUM/HIGH/CRITICAL risk
+    badge) — one authoritative implementation instead of two drifting
+    copies of the same policy.
+
+    Returns (new_level, escalation_reason_or_None). A missing/absent
+    `disturbance_detected` (e.g. a "no_data" satellite result) is
+    treated as "nothing to escalate", not an error.
+    """
+    if not satellite_result or not satellite_result.get("disturbance_detected"):
+        return current_level, None
+    if current_level not in tier_order:
+        return current_level, None
+    idx = tier_order.index(current_level)
+    if idx >= len(tier_order) - 1:
+        return current_level, None  # already at the top tier
+    new_level = tier_order[idx + 1]
+    reason = f"Satellite disturbance flag forced escalation from '{current_level}' to '{new_level}'."
+    return new_level, reason
+
+
 def run_dynamic_layer(cfg: DistrictConfig,
                        local_iot_reading_pct: Optional[float] = None,
                        satellite_region=None,
@@ -95,18 +124,13 @@ def run_dynamic_layer(cfg: DistrictConfig,
         )
 
     final_state = rainfall_result.state
-    escalation_reason = None
     # Satellite override: architecture doc Section 8 — a confirmed
     # satellite anomaly can force an escalation regardless of the
     # numeric TriggerScore (kept as an explicit override, not folded
     # numerically into the score, per Section 6.4).
-    if satellite_result and satellite_result.get("disturbance_detected"):
-        if final_state == "normal":
-            final_state = "watch"
-            escalation_reason = "Satellite disturbance flag forced escalation from 'normal' to 'watch'."
-        elif final_state == "watch":
-            final_state = "warning"
-            escalation_reason = "Satellite disturbance flag forced escalation from 'watch' to 'warning'."
+    final_state, escalation_reason = apply_satellite_escalation(
+        final_state, ["normal", "watch", "warning"], satellite_result
+    )
 
     return DynamicLayerResult(
         rainfall=rainfall_result,
