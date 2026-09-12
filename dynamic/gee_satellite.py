@@ -233,7 +233,19 @@ def fetch_disturbance_flag_for_village(
         sar_mask = sar_mask[:rows, :cols]
 
     combined_mask = scd.combined_disturbance_flag(ndvi_mask, sar_mask)
-    summary = scd.disturbance_summary(combined_mask, cfg)
+    # Sentinel-1 (GRD IW) and Sentinel-2 (B4/B8) are both native 10m
+    # resolution here, NOT the 30m DEM/terrain-factor pixels that
+    # cfg.pixel_area_m2 is calibrated for elsewhere in the pipeline.
+    # Pass the real 10m x 10m = 100 m^2 pixel area explicitly so the
+    # reported disturbed area isn't inflated ~9x.
+    summary = scd.disturbance_summary(combined_mask, cfg, pixel_area_m2=100.0)
+
+    # Where in the query box is the disturbance concentrated? Returned as
+    # (row_frac, col_frac) in [0,1] against the pixel grid; the caller
+    # combines this with the region's actual lat/lon bounds (which only
+    # the caller knows, since `region` here is an opaque ee.Geometry) to
+    # get a real coordinate for reverse-geocoding / map placement.
+    summary["centroid_frac"] = scd.disturbance_centroid_fraction(combined_mask)
     summary.update(
         {
             "status": "ok",

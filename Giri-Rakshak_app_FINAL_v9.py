@@ -4,7 +4,7 @@ import json
 import base64
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from io import BytesIO
 import streamlit.components.v1 as components
 
@@ -41,7 +41,7 @@ except Exception:
     colors = None
 
 from risk_fusion import fuse_risk
-from dynamic.config import EAST_KHASI_HILLS
+from dynamic.config import EAST_KHASI_HILLS, GENERIC_NER_DISTRICT
 
 
 # ============================================================
@@ -57,6 +57,54 @@ st.set_page_config(
 
 ROOT = Path(__file__).parent
 IMG_DIR = ROOT / "project image"
+
+
+def initialize_gee():
+    """Initialize Google Earth Engine using the user's existing credentials."""
+    try:
+        import ee
+    except ImportError:
+        return False, "earthengine-api is not installed. Run: pip install earthengine-api"
+
+    try:
+        ee.Initialize(project="landslide-risk-monitoring")
+        return True, "Google Earth Engine connected."
+    except Exception as exc:
+        return False, (
+            "Google Earth Engine is not authenticated/initialized. "
+            "Run `earthengine authenticate` once in the same environment, "
+            "then restart Streamlit. Details: " + str(exc)
+        )
+
+
+SAT_HALF_SIZE_DEG = 0.01  # ~1.1km half-width query box; shared by make_satellite_region() and the centroid->lat/lon math below
+
+
+def make_satellite_region(lat, lon, half_size_deg=SAT_HALF_SIZE_DEG):
+    import ee
+    return ee.Geometry.Rectangle([
+        lon - half_size_deg, lat - half_size_deg,
+        lon + half_size_deg, lat + half_size_deg,
+    ])
+
+
+# --- Satellite -> risk-level escalation (mirrors the normal->watch->warning
+# override rule in dynamic/pipeline.py, applied to the 4-tier LOW/MEDIUM/
+# HIGH/CRITICAL scale used in this app's risk badge). Kept as an explicit
+# override on the categorical level, NOT folded into the numeric RiskScore,
+# same design rationale as pipeline.py's satellite override. ---
+RISK_LEVELS_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+
+def escalate_risk_level(level: str) -> str:
+    if level not in RISK_LEVELS_ORDER:
+        return level
+    idx = RISK_LEVELS_ORDER.index(level)
+    return RISK_LEVELS_ORDER[min(idx + 1, len(RISK_LEVELS_ORDER) - 1)]
+
+
+def sat_loc_key(loc):
+    return f"{round(loc['lat'], 4)}_{round(loc['lon'], 4)}"
 
 LOGO_PATH = IMG_DIR / "logo.png"
 HEADER_IMG = IMG_DIR / "header.png"
@@ -267,6 +315,54 @@ def make_susceptibility_plot(lat, lon, name):
     cbar.ax.tick_params(labelsize=10)
     fig.tight_layout()
     return fig
+
+
+@st.cache_data(ttl=1800)
+def reverse_geocode(lat, lon):
+    """Best-effort lat/lon -> human place name via OpenStreetMap Nominatim.
+    Returns a short locality string, or None if the lookup fails."""
+    params = {
+        "format": "jsonv2",
+        "lat": f"{lat:.6f}",
+        "lon": f"{lon:.6f}",
+        "zoom": 14,          # town/suburb-level detail, not house-level
+        "addressdetails": 1,
+    }
+    url = "https://nominatim.openstreetmap.org/reverse?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": "Giri-Rakshak-Landslide-EWS/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return None
+
+    addr = data.get("address", {})
+    locality = (
+        addr.get("village") or addr.get("town") or addr.get("suburb")
+        or addr.get("hamlet") or addr.get("city") or addr.get("county")
+    )
+    district = addr.get("state_district") or addr.get("county")
+    parts = [p for p in [locality, district] if p and p != locality]
+    if locality:
+        return locality + (f", {parts[0]}" if parts else "")
+    return data.get("display_name")
+
+
+def haversine_km_bearing(lat1, lon1, lat2, lon2):
+    """Distance (km) and 8-point compass direction from point 1 to point 2."""
+    R = 6371.0
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+    dist_km = 2 * R * np.arcsin(np.sqrt(a))
+
+    y = np.sin(dlambda) * np.cos(phi2)
+    x = np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(dlambda)
+    bearing_deg = (np.degrees(np.arctan2(y, x)) + 360) % 360
+    compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    direction = compass[round(bearing_deg / 45) % 8]
+    return dist_km, direction
 
 
 @st.cache_data(ttl=1800)
@@ -674,6 +770,9 @@ def make_pdf_report(loc, state, sus, trig, risk_score, risk_level, cur, r24, r72
 
 if "has_searched" not in st.session_state:
     st.session_state["has_searched"] = False
+
+if "sat_checks" not in st.session_state:
+    st.session_state["sat_checks"] = {}  # loc_key -> {result, checked_at, before_window, after_window}
 
 if "location" not in st.session_state:
     st.session_state["location"] = {
@@ -1705,6 +1804,25 @@ else:
             risk_score = None
             risk_level = "UNAVAILABLE"
 
+    # --------------------------------------------------------
+    # SATELLITE ESCALATION OVERRIDE
+    # A confirmed satellite disturbance for THIS location bumps the
+    # categorical risk level up one tier, same rule as dynamic/pipeline.py's
+    # normal->watch->warning override — corroborating evidence, not folded
+    # numerically into risk_score itself.
+    # --------------------------------------------------------
+    sat_stored = st.session_state["sat_checks"].get(sat_loc_key(loc))
+    sat_escalated = False
+    if (
+        sat_stored
+        and sat_stored["result"].get("status") == "ok"
+        and sat_stored["result"].get("disturbance_detected")
+        and risk_level != "UNAVAILABLE"
+    ):
+        escalated_level = escalate_risk_level(risk_level)
+        sat_escalated = escalated_level != risk_level
+        risk_level = escalated_level
+
     temp_val = round(cur.get("temperature_2m", 22)) if cur else 22
     humidity_val = round(cur.get("relative_humidity_2m", 92)) if cur else 92
     wind_val = round(cur.get("wind_speed_10m", 7)) if cur else 7
@@ -1737,6 +1855,13 @@ else:
     r_disp = f"{risk_score:.4f}" if risk_score is not None else "0.4420"
     badge_color = "#f59e0b" if risk_level == "MEDIUM" else ("#ef4444" if risk_level in {"HIGH","CRITICAL"} else "#22c55e")
 
+    sat_badge_html = ""
+    if sat_escalated:
+        sat_badge_html = """
+<div style="margin-top:10px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.5); border-radius: 10px; padding: 8px 14px; font-size: 12.5px; font-weight: 700; color: #fecaca; display:flex; align-items:center; gap:8px;">
+🛰️ Escalated by confirmed satellite disturbance signal (corroborating evidence, see Satellite Change Detection below)
+</div>"""
+
     st.markdown(f"""
 <div class="risk-intel-box">
 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1766,6 +1891,7 @@ else:
 <div class="risk-col-lbl">Risk Level</div>
 </div>
 </div>
+{sat_badge_html}
 </div>
 """, unsafe_allow_html=True)
 
@@ -1938,6 +2064,168 @@ Live atmospheric observations across {state}. Surface wind blowing from northeas
         else:
             st.info(f"State susceptibility map for {state} is not available in the current production coverage.")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # LAYER 3b: SATELLITE CHANGE DETECTION — REAL GEE NDVI/SAR CHECK
+    # --------------------------------------------------------
+    st.markdown("---")
+    st.subheader("🛰️ Satellite Change Detection")
+    st.caption(
+        "Runs the real Sentinel-2 NDVI + Sentinel-1 SAR disturbance detector "
+        "(dynamic/gee_satellite.py + dynamic/satellite_change_detection.py) "
+        "against a small village-scale area around the searched location. "
+        "This is a live Earth Engine query, not a cached/static tile."
+    )
+
+    with st.expander("🛰️ Run real satellite disturbance check", expanded=False):
+        st.caption(
+            "Compares a 'before' window against an 'after' window. Optical "
+            "Sentinel-2 can be unavailable during heavy monsoon cloud; "
+            "Sentinel-1 SAR is used as a fallback / corroborating source."
+        )
+
+        today = date.today()
+        default_before_start = today - timedelta(days=60)
+        default_before_end = today - timedelta(days=31)
+        default_after_start = today - timedelta(days=30)
+        default_after_end = today
+
+        d1, d2 = st.columns(2)
+        with d1:
+            before_start = st.date_input("Before — start", default_before_start, key="sat_before_start")
+            before_end = st.date_input("Before — end", default_before_end, key="sat_before_end")
+        with d2:
+            after_start = st.date_input("After — start", default_after_start, key="sat_after_start")
+            after_end = st.date_input("After — end", default_after_end, key="sat_after_end")
+
+        run_satellite = st.button("🔬 Run Real Satellite Check", type="primary", use_container_width=True, key="btn_run_satellite_check")
+
+        if run_satellite:
+            if not (before_start < before_end and after_start < after_end):
+                st.error("Each satellite date window must have start < end.")
+            else:
+                gee_ok, gee_message = initialize_gee()
+                if not gee_ok:
+                    st.warning(gee_message)
+                else:
+                    fetch_ok = False
+                    try:
+                        from dynamic.gee_satellite import fetch_disturbance_flag_for_village
+
+                        region = make_satellite_region(loc["lat"], loc["lon"], half_size_deg=SAT_HALF_SIZE_DEG)
+
+                        sat_is_pilot = (
+                            abs(loc["lat"] - EAST_KHASI_HILLS.station_lat) < 0.15
+                            and abs(loc["lon"] - EAST_KHASI_HILLS.station_lon) < 0.15
+                        )
+                        sat_cfg = EAST_KHASI_HILLS if sat_is_pilot else GENERIC_NER_DISTRICT
+
+                        with st.spinner("Fetching real Sentinel-2 + Sentinel-1 data from Google Earth Engine..."):
+                            satellite_result = fetch_disturbance_flag_for_village(
+                                region,
+                                (before_start.isoformat(), before_end.isoformat()),
+                                (after_start.isoformat(), after_end.isoformat()),
+                                sat_cfg,
+                                max_cloud=50,
+                            )
+
+                        # Persist so the risk badge above can pick this up
+                        # and escalate on rerun, and so the result survives
+                        # across reruns instead of vanishing on next click.
+                        st.session_state["sat_checks"][sat_loc_key(loc)] = {
+                            "result": satellite_result,
+                            "checked_at": datetime.now().strftime("%d %b %Y, %H:%M"),
+                            "before_window": (before_start.isoformat(), before_end.isoformat()),
+                            "after_window": (after_start.isoformat(), after_end.isoformat()),
+                        }
+                        fetch_ok = True
+
+                    except Exception as exc:
+                        st.error(f"Satellite monitoring failed: {exc}")
+
+                    if fetch_ok:
+                        st.rerun()
+
+        # Always show the latest stored result for the CURRENT location, if
+        # any — persists across reruns and is what the risk badge above is
+        # reading to decide whether to escalate.
+        stored_check = st.session_state["sat_checks"].get(sat_loc_key(loc))
+        if stored_check:
+            satellite_result = stored_check["result"]
+            st.caption(
+                f"Last checked: {stored_check['checked_at']} · "
+                f"before {stored_check['before_window'][0]} → {stored_check['before_window'][1]} · "
+                f"after {stored_check['after_window'][0]} → {stored_check['after_window'][1]}"
+            )
+
+            if satellite_result.get("status") == "ok":
+                sources = satellite_result.get("sources_used", [])
+                flagged = int(satellite_result.get("flagged_pixels", 0))
+                detected = bool(satellite_result.get("disturbance_detected", False))
+
+                st.success("Satellite check completed using: " + (", ".join(sources) if sources else "no source"))
+
+                s1, s2, s3 = st.columns(3)
+                with s1:
+                    st.metric("Disturbance detected", "YES" if detected else "NO")
+                with s2:
+                    st.metric("Flagged pixels", f"{flagged:,}")
+                with s3:
+                    st.metric("Sources used", str(len(sources)))
+
+                if detected:
+                    st.error(
+                        "🔴 Satellite disturbance signal detected in the selected "
+                        "monitoring window. This has escalated the Risk Level shown "
+                        "above by one tier as corroborating evidence — not proof of "
+                        "an active landslide."
+                    )
+
+                    # --------------------------------------------------------
+                    # WHERE exactly, within the query box, is it concentrated?
+                    # centroid_frac is (row_frac, col_frac) in [0,1] over the
+                    # pixel grid; SAT_HALF_SIZE_DEG must match the value
+                    # passed to make_satellite_region() above.
+                    # --------------------------------------------------------
+                    centroid_frac = satellite_result.get("centroid_frac")
+                    if centroid_frac:
+                        row_frac, col_frac = centroid_frac
+                        lat_min = loc["lat"] - SAT_HALF_SIZE_DEG
+                        lat_max = loc["lat"] + SAT_HALF_SIZE_DEG
+                        lon_min = loc["lon"] - SAT_HALF_SIZE_DEG
+                        lon_max = loc["lon"] + SAT_HALF_SIZE_DEG
+                        # row 0 = north edge (top of array), col 0 = west edge
+                        c_lat = lat_max - row_frac * (lat_max - lat_min)
+                        c_lon = lon_min + col_frac * (lon_max - lon_min)
+
+                        dist_km, direction = haversine_km_bearing(loc["lat"], loc["lon"], c_lat, c_lon)
+                        locality = reverse_geocode(c_lat, c_lon)
+
+                        where_txt = locality if locality else f"{c_lat:.5f}, {c_lon:.5f}"
+                        st.warning(
+                            f"📍 **Anomaly concentrated near: {where_txt}** "
+                            f"(~{dist_km:.2f} km {direction} of {loc['name']}, "
+                            f"{c_lat:.5f}°N {c_lon:.5f}°E). This is the pixel "
+                            f"centroid of the flagged area, not a guaranteed "
+                            f"single point — the disturbance may be spread "
+                            f"across the query box. Ground verification is "
+                            f"still needed before alerting residents."
+                        )
+                        st.caption(
+                            f"[View on Google Maps](https://www.google.com/maps/search/?api=1&query={c_lat:.6f},{c_lon:.6f})"
+                        )
+                else:
+                    st.success("🟢 No pixels crossed the configured disturbance threshold in this monitoring window.")
+
+                with st.expander("Satellite audit details"):
+                    st.json(satellite_result)
+            else:
+                st.info(
+                    "No usable satellite scene was available for the selected "
+                    "before/after windows. This is a real data-availability "
+                    "result, not a synthetic fallback."
+                )
+                st.json(satellite_result)
 
     # --------------------------------------------------------
     # LAYER 4: 7-DAY FORECAST GRID (EXACT PIC 4 DESIGN)

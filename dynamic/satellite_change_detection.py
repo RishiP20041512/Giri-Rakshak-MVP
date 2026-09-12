@@ -51,6 +51,25 @@ def sar_disturbance_mask(sar_diff_db: np.ndarray, cfg: DistrictConfig) -> np.nda
     return np.abs(sar_diff_db) >= cfg.sar_abs_threshold_db
 
 
+def disturbance_centroid_fraction(mask: np.ndarray):
+    """
+    Mean (row, col) position of all True pixels in `mask`, normalized to
+    [0, 1] by the mask's own shape. Returns None if nothing is flagged.
+
+    row_frac=0 is the top row of the array (north edge, since Earth Engine
+    sampleRectangle arrays run north-to-south), col_frac=0 is the left
+    column (west edge, arrays run west-to-east). Callers combine this with
+    the query region's real lat/lon bounds to get an actual centroid
+    coordinate — this function only knows about the pixel grid.
+    """
+    rows, cols = np.where(mask)
+    if rows.size == 0:
+        return None
+    row_frac = float(np.mean(rows)) / max(mask.shape[0] - 1, 1)
+    col_frac = float(np.mean(cols)) / max(mask.shape[1] - 1, 1)
+    return row_frac, col_frac
+
+
 # ---------------------------------------------------------------------------
 # 3. Combined flag + summary
 # ---------------------------------------------------------------------------
@@ -70,9 +89,19 @@ def combined_disturbance_flag(ndvi_mask: np.ndarray = None, sar_mask: np.ndarray
     return ndvi_mask | sar_mask
 
 
-def disturbance_summary(mask: np.ndarray, cfg: DistrictConfig) -> dict:
+def disturbance_summary(mask: np.ndarray, cfg: DistrictConfig, pixel_area_m2: float = None) -> dict:
+    """
+    pixel_area_m2: area of ONE pixel in the mask being summarized, in m^2.
+    Defaults to cfg.pixel_area_m2 (30m DEM/terrain-factor pixels, per
+    config.py) for backward compatibility, but callers working with a
+    different native resolution (e.g. 10m Sentinel-1/Sentinel-2 pixels
+    via gee_satellite.py) should pass the correct value explicitly —
+    using the 30m DEM assumption on 10m satellite pixels over-reports
+    the disturbed area by ~9x.
+    """
     flagged_pixels = int(np.sum(mask))
-    area_ha = (flagged_pixels * cfg.pixel_area_m2) / 10000.0
+    effective_pixel_area_m2 = pixel_area_m2 if pixel_area_m2 is not None else cfg.pixel_area_m2
+    area_ha = (flagged_pixels * effective_pixel_area_m2) / 10000.0
     return {"flagged_pixels": flagged_pixels, "estimated_area_ha": round(area_ha, 2)}
 
 
